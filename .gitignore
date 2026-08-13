@@ -1,0 +1,6 @@
+.env
+.env.example_副本
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.py[cod]
