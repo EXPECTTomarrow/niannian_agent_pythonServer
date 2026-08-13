@@ -1,0 +1,8 @@
+.git
+.env
+.env.example_副本
+.DS_Store
+.pytest_cache
+__pycache__
+*.py[cod]
+tests

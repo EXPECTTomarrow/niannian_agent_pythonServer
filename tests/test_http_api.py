@@ -90,3 +90,13 @@ class HttpApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+from pathlib import Path
+
+
+def test_cloudbase_container_uses_the_python_module_entrypoint():
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile").read_text()
+
+    assert "pip install --no-cache-dir ." in dockerfile
+    assert "EXPOSE 8080" in dockerfile
+    assert 'CMD ["python", "-m", "niannian_agent"]' in dockerfile
