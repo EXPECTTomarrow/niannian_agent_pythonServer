@@ -221,6 +221,26 @@ def test_import_agent_replans_an_invalid_choice_payload_into_a_structured_choice
     assert result["ui"]["kind"] == "choice_required"
     assert len(result["ui"]["options"]) == 2
 
+
+def test_import_agent_requires_date_skill_before_accepting_a_birthday_mutation():
+    class DateAwareLLM:
+        def __init__(self): self.calls = 0
+        def chat(self, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return {"tool_call": {"name": "import.mutate", "arguments": {"action": "update", "target": {"sourceRow": 9}, "changes": {"field": "birthday", "value": "11/22/89"}}}}
+            if self.calls == 2:
+                assert any("date.parse" in item.get("content", "") for item in messages)
+                return {"tool_call": {"name": "date.parse", "arguments": {"value": "11/22/89"}}}
+            return {"content": "这个日期包含两位年份，无法确认世纪。请选择正确年份后我再更新预览。"}
+
+    result = Agent(DateAwareLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=4)).run(
+        "import-date-validation", "u1", "处理第9行生日", import_summary={"rows": [{"sourceRow": 9, "rawValues": {"生日": "11/22/89"}}]}
+    )
+
+    assert result["status"] == "completed"
+    assert result["importPlan"] == []
+
 def test_grounded_agent_retries_when_the_model_answers_before_using_a_tool():
     class PrematureAnswerLLM:
         def __init__(self): self.calls = 0

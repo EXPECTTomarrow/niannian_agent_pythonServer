@@ -1,11 +1,13 @@
 from typing import Any
 
 from .skills import SkillRegistry, Tool
+from .date_skill import register_date_skill
 
 
 def import_draft_skill() -> SkillRegistry:
     """Tools that produce plans for the client-side import draft only."""
     registry = SkillRegistry()
+    register_date_skill(registry)
 
     def compare(arguments: dict[str, Any], _: Any) -> dict[str, Any]:
         return {

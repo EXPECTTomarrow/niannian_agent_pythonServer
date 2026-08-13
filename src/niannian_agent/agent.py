@@ -24,7 +24,7 @@ class Agent:
         if state.subject_contact:
             system_content += " Current conversation subject: " + json.dumps(state.subject_contact, ensure_ascii=False) + ". Resolve pronouns such as 他、她、这位联系人 to this subject unless the user explicitly names another contact."
         if is_import_draft:
-            system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, and editable fields; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. For ambiguous regional date formats or two-digit years, explain the possible interpretation and ask the user to confirm; only prepare a date change after the user gives the intended full date or explicitly maps the two-digit year. Return a concise answer in Chinese. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
+            system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, and editable fields; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. Before every birthday mutation, call date.parse with the original or proposed date. Only a resolved ISO value may be passed to import.mutate. For ambiguous regional date formats or two-digit years, ask the user to confirm by using import.propose_choice with the date.parse candidates; do not guess a locale or century. For an invalid date, explain the correction needed naturally. Return a concise answer in Chinese. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
         messages = [{"role": "system", "content": system_content}]
         messages += [{"role": "user", "content": message}]
         # Import drafts may require inspection, several row edits, and one final reply.
@@ -32,6 +32,7 @@ class Agent:
         max_steps = self.settings.max_steps
         has_observation = False
         attempted_calls: set[str] = set()
+        blocked_date_targets: set[str] = set()
         turn_import_plan: list[dict[str, Any]] = []
         for _ in range(max_steps):
             reply = self.llm.chat(messages, skills.definitions())
@@ -72,6 +73,21 @@ class Agent:
             attempted_calls.add(call_signature)
             print(json.dumps({"event": "agent.tool_call", "requestId": request_id, "tool": call.get("name"), "arguments": call.get("arguments", {})}, ensure_ascii=False), flush=True)
             tool = skills.get(call["name"])
+            if is_import_draft and tool.name == "import.mutate":
+                arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+                target = arguments.get("target") if isinstance(arguments.get("target"), dict) else {}
+                target_key = json.dumps(target, ensure_ascii=False, sort_keys=True)
+                if arguments.get("action") == "update" and arguments.get("changes", {}).get("field") == "birthday" and target_key in blocked_date_targets:
+                    messages.append({"role": "system", "content": "This date target is still ambiguous. Do not apply any birthday mutation until the user confirms a candidate. Use import.propose_choice with valid ISO candidates or ask a natural clarification."})
+                    continue
+                date_gate = self._validate_import_birthday(skills, call)
+                if date_gate:
+                    if date_gate["status"] == "resolved":
+                        call["arguments"]["changes"]["value"] = date_gate["value"]
+                    else:
+                        blocked_date_targets.add(target_key)
+                        messages.append({"role": "system", "content": "date.parse result: " + json.dumps(date_gate, ensure_ascii=False) + ". Do not create an import mutation for this birthday. If ambiguous, use import.propose_choice with only valid ISO date candidates; if invalid, explain what needs correction naturally in Chinese."})
+                        continue
             if progress:
                 progress(self._progress_label(tool.name, call.get("arguments", {})))
             try:
@@ -123,7 +139,7 @@ class Agent:
                 if is_import_draft:
                     output["importPlan"] = []
                 return output
-            if result.get("status") == "ambiguous":
+            if result.get("status") == "ambiguous" and tool.name != "date.parse":
                 state.pending_candidates = [item for item in result.get("contacts", []) if isinstance(item, dict)][:10]
                 content = self._clarification_message(result)
                 state.append("assistant_message", content=content)
@@ -135,6 +151,16 @@ class Agent:
         state.status = "budget_exhausted"
         store.save(state, expected)
         return {"status": "budget_exhausted", "content": "我暂时无法完成这个任务，请换一种说法。", "revision": state.revision, "subjectContact": state.subject_contact}
+
+    @staticmethod
+    def _validate_import_birthday(skills: SkillRegistry, call: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Require deterministic date interpretation before a draft birthday mutation."""
+        arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        changes = arguments.get("changes") if isinstance(arguments.get("changes"), dict) else {}
+        if arguments.get("action") != "update" or changes.get("field") != "birthday":
+            return None
+        parser = skills.get("date.parse")
+        return parser.handler({"value": changes.get("value", "")}, None)
 
     def list_conversations(self, actor_token: str) -> dict[str, Any]:
         if not self.state_store_factory:
