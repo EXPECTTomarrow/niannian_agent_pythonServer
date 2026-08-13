@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Callable, Optional
 from .config import Settings
 from .state import InMemoryStateStore
@@ -25,6 +26,14 @@ class Agent:
             system_content += " Current conversation subject: " + json.dumps(state.subject_contact, ensure_ascii=False) + ". Resolve pronouns such as 他、她、这位联系人 to this subject unless the user explicitly names another contact."
         if is_import_draft:
             system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, and editable fields; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. Before every birthday mutation, call date.parse with the original or proposed date. Only a resolved ISO value may be passed to import.mutate. For ambiguous regional date formats or two-digit years, ask the user to confirm by using import.propose_choice with the date.parse candidates; do not guess a locale or century. For an invalid date, explain the correction needed naturally. Return a concise answer in Chinese. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
+            preflight = None if self._has_explicit_date_instruction(message) else self._preflight_import_dates(import_summary, skills)
+            if preflight:
+                content = str(preflight.get("message", "请先确认导入文件中的日期解释。"))
+                state.append("assistant_message", content=content)
+                state.pending_mutation = {"kind": "import_choice", "title": preflight["title"], "options": preflight["options"]}
+                state.status = "waiting_for_user"
+                store.save(state, expected)
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "choice_required", "content": content, "title": preflight["title"], "options": preflight["options"]}, "importPlan": []}
         messages = [{"role": "system", "content": system_content}]
         messages += [{"role": "user", "content": message}]
         # Import drafts may require inspection, several row edits, and one final reply.
@@ -161,6 +170,37 @@ class Agent:
             return None
         parser = skills.get("date.parse")
         return parser.handler({"value": changes.get("value", "")}, None)
+
+    @staticmethod
+    def _preflight_import_dates(import_summary: dict[str, Any], skills: SkillRegistry) -> Optional[dict[str, Any]]:
+        rows = import_summary.get("rows") if isinstance(import_summary, dict) else []
+        parser = skills.get("date.parse")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            raw_values = row.get("rawValues") if isinstance(row.get("rawValues"), dict) else {}
+            raw = next((raw_values.get(key) for key in ("生日", "出生日期", "出生年月", "公历生日", "农历生日") if raw_values.get(key) not in (None, "")), None)
+            if raw is None:
+                continue
+            parsed = parser.handler({"value": raw}, None)
+            if parsed.get("status") != "ambiguous":
+                continue
+            source_row = int(row.get("sourceRow", 0) or 0)
+            name = str(row.get("name") or f"第{source_row}行")
+            options = []
+            for candidate in parsed.get("candidates", []):
+                value = str(candidate.get("value", ""))
+                if not value:
+                    continue
+                options.append({"id": f"date-{source_row}-{value}", "label": value, "description": candidate.get("description", ""), "steps": [{"tool": "mutate_import", "action": "update", "target": {"sourceRow": source_row}, "changes": {"field": "birthday", "value": value}}]})
+            if len(options) >= 2:
+                return {"title": f"确认{name}的生日", "message": f"{name}的原始生日“{raw}”存在多种可能解释，请选择正确日期。", "options": options}
+        return None
+
+    @staticmethod
+    def _has_explicit_date_instruction(message: str) -> bool:
+        source = str(message or "")
+        return bool(re.search(r"(?:按|采用|使用).{0,8}(?:月[日天]年|日[月天]年|年[月天]日)", source))
 
     def list_conversations(self, actor_token: str) -> dict[str, Any]:
         if not self.state_store_factory:

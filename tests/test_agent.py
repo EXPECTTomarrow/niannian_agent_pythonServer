@@ -146,7 +146,7 @@ def test_import_agent_returns_structured_choices_for_an_ambiguous_date_before_an
         "import-date-choice", "u1", "处理日期", import_summary={"rows": [{"sourceRow": 30, "rawValues": {"生日": "4/11/93"}}]}
     )
     assert result["ui"]["kind"] == "choice_required"
-    assert len(result["ui"]["options"]) == 2
+    assert len(result["ui"]["options"]) == 4
     assert result["importPlan"] == []
 
 def test_import_follow_up_receives_the_pending_choice_state():
@@ -239,6 +239,24 @@ def test_import_agent_requires_date_skill_before_accepting_a_birthday_mutation()
     )
 
     assert result["status"] == "completed"
+    assert result["importPlan"] == []
+
+
+def test_import_agent_proactively_returns_date_choices_for_uploaded_ambiguous_rows():
+    class NeverCalledLLM:
+        def chat(self, *_):
+            raise AssertionError("ambiguous imported dates should be handled before the model is called")
+
+    result = Agent(NeverCalledLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=4)).run(
+        "import-date-preflight", "u1", "导入联系人", import_summary={"rows": [
+            {"sourceRow": 9, "name": "许嘉言", "rawValues": {"生日": "11/22/89"}},
+            {"sourceRow": 30, "name": "孙文博", "rawValues": {"生日": "4/11/93"}},
+        ]}
+    )
+
+    assert result["ui"]["kind"] == "choice_required"
+    assert result["ui"]["title"] == "确认许嘉言的生日"
+    assert {option["id"] for option in result["ui"]["options"]} == {"date-9-1989-11-22", "date-9-2089-11-22"}
     assert result["importPlan"] == []
 
 def test_grounded_agent_retries_when_the_model_answers_before_using_a_tool():
