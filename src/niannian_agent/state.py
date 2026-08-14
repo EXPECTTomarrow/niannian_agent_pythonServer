@@ -13,6 +13,7 @@ class ConversationState:
     goal: Optional[str] = None
     last_execution: Optional[dict[str, Any]] = None
     pending_mutation: Optional[dict[str, Any]] = None
+    active_task: Optional[dict[str, Any]] = None
     status: str = "idle"
     summary: str = ""
 
@@ -61,6 +62,7 @@ class PersistentStateStore:
         self._event_offsets[session_id] = len(events[-20:])
         task = state.get("task") if isinstance(state.get("task"), dict) else {}
         pending_mutation = state.get("workItems", {}).get("pendingMutation") if isinstance(state.get("workItems"), dict) else None
+        active_task = state.get("activeTask") if isinstance(state.get("activeTask"), dict) else None
         return ConversationState(
             session_id=session_id, user_id=user_id, revision=self._remote_revision[session_id],
             timeline=[item for item in events[-20:] if isinstance(item, dict)], subject_contact=subject,
@@ -69,6 +71,7 @@ class PersistentStateStore:
             status=task.get("status") if isinstance(task.get("status"), str) and task.get("status") else "idle",
             summary=state.get("summary") if isinstance(state.get("summary"), str) else "",
             pending_mutation=pending_mutation if isinstance(pending_mutation, dict) else None,
+            active_task=active_task,
         )
 
     def save(self, state: ConversationState, expected_revision: int) -> ConversationState:
@@ -88,6 +91,7 @@ class PersistentStateStore:
             "subjectContact": state.subject_contact,
             "task": {"domain": "", "goal": state.goal or "", "status": state.status},
             "workItems": {"pendingCandidates": state.pending_candidates[:10], "pendingMutation": state.pending_mutation}, "facts": [], "summary": summary,
+            "activeTask": state.active_task,
         }
         saved = self.client.commit_conversation(state.session_id, remote_revision, projection, events, self.actor_token)
         self._remote_revision[state.session_id] = int(saved.get("revision", remote_revision + 1))

@@ -56,6 +56,7 @@ class AgentHttpApplication:
                 return {"code": "REQUEST_INVALID"}, 400
             import_summary = payload.get("importSummary") if isinstance(payload.get("importSummary"), dict) else None
             import_preflight = payload.get("importPreflight") is True
+            import_artifact = payload.get("importArtifact") if isinstance(payload.get("importArtifact"), dict) else None
             subject_contact = payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None
             require_observation = payload.get("requireObservation") is True
             def run_agent(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -63,6 +64,7 @@ class AgentHttpApplication:
                     kwargs["subject_contact"] = subject_contact
                 kwargs["authorized_scope"] = str(actor.get("scope", ""))
                 kwargs["import_preflight"] = import_preflight
+                kwargs["import_artifact"] = import_artifact
                 return self.agent.run(*args, **kwargs)
             with self._session_lock(actor, session_id):
                 if import_summary is None:

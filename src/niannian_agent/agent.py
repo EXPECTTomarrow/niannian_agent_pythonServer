@@ -9,7 +9,7 @@ class Agent:
     def __init__(self, llm: Any, skills: SkillRegistry, store: Optional[InMemoryStateStore] = None, settings: Optional[Settings] = None, skill_factory: Optional[Callable[[str], SkillRegistry]] = None, state_store_factory: Optional[Callable[[str], Any]] = None) -> None:
         self.llm, self.skills, self.store, self.settings, self.skill_factory, self.state_store_factory = llm, skills, store or InMemoryStateStore(), settings or Settings(), skill_factory, state_store_factory
 
-    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "", import_preflight: bool = False) -> dict[str, Any]:
+    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "", import_preflight: bool = False, import_artifact: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         store = self.state_store_factory(actor_token) if self.state_store_factory and actor_token else self.store
         state = store.load(session_id, user_id)
         if isinstance(subject_contact, dict) and subject_contact.get("id") and subject_contact.get("name"):
@@ -17,6 +17,15 @@ class Agent:
         is_import_draft = isinstance(import_summary, dict)
         skills = __import__("niannian_agent.import_draft", fromlist=["import_draft_skill"]).import_draft_skill() if is_import_draft else (self.skill_factory(actor_token) if self.skill_factory else self.skills)
         expected = state.revision
+        if is_import_draft:
+            from .date_skill import parse_date
+            from .task_runtime import focused_work_item, reconcile_import_task, resolve_task_choice
+            artifact = import_artifact if isinstance(import_artifact, dict) else {"id": f"draft-{session_id}", "revision": 0}
+            saved_artifact = state.active_task.get("artifact", {}) if isinstance(state.active_task, dict) else {}
+            incoming_revision = max(0, int(artifact.get("revision", 0) or 0))
+            if saved_artifact.get("id") == artifact.get("id") and incoming_revision < int(saved_artifact.get("revision", 0) or 0):
+                return {"status": "conflict", "code": "AGENT_ARTIFACT_REVISION_CONFLICT", "content": "导入草稿已更新，请重新载入最新预览。", "revision": state.revision, "task": state.active_task}
+            state.active_task = reconcile_import_task(state.active_task, import_summary, artifact, parse_date)
         state.append("user_message", content=message, requestId=request_id)
         print(json.dumps({"event": "agent.request", "requestId": request_id, "sessionId": session_id, "user": user_id[-8:], "message": message[:200]}, ensure_ascii=False), flush=True)
         system_content = "You are a careful private assistant. Be attentive to the user's long-running context, verify external facts with available tools, and answer naturally in Chinese. Never mention tools, skills, APIs, internal identifiers, or implementation details. For questions about today, now, relative dates, or date ranges such as future three months, obtain the current time through the available time capability before answering. When a search or organization resolution returns multiple candidates, ask the user to choose and do not guess from stale history. A newly named entity must be resolved again; pronouns and a relationship reference such as 妈妈 refer only to the current confirmed subject. Do not re-search a confirmed subject for a follow-up gift or advice request. Use total fields for counts, never infer a total from a visible page. For a new contact, use contact.propose_create to prepare the existing editable contact form. For any update, use contact.propose_update; for deletion use contact.propose_delete immediately after a unique target is confirmed. These only prepare confirmation or form instructions and never write data. Never claim a contact was created, updated, or deleted unless an execution observation confirms it. For multiple full profiles, use contact.batch_details."
@@ -28,7 +37,7 @@ class Agent:
             system_content += " Current conversation subject: " + json.dumps(state.subject_contact, ensure_ascii=False) + ". Resolve pronouns such as 他、她、这位联系人 to this subject unless the user explicitly names another contact."
         if is_import_draft:
             system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, editable fields, and duplicate candidates; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. Before every birthday mutation, call date.parse with the original or proposed date. Only a resolved ISO value may be passed to import.mutate. For ambiguous regional date formats or two-digit years, ask the user to confirm by using import.propose_choice with the date.parse candidates; do not guess a locale or century. For an invalid date, explain the correction needed naturally. When the user decides a duplicate row, use import.mutate with resolve_duplicate and the explicit decision. Return concise plain Chinese text: state the outcome first, list only necessary rows, and end with one clear next action. Do not use Markdown, tables, card language, internal operation names, JSON, or detailed execution logs. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
-            pending_result = self._resolve_pending_import_choice(state, message)
+            state.active_task, pending_result = resolve_task_choice(state.active_task, message)
             if pending_result:
                 content = f"已按“{pending_result['label']}”更新导入预览，请继续核对剩余日期和联系人信息。"
                 state.append("assistant_message", content=content)
@@ -36,22 +45,21 @@ class Agent:
                 state.pending_mutation = None
                 state.status = "completed"
                 store.save(state, expected)
-                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "choice_applied", "content": content, "optionId": pending_result["id"]}, "importPlan": pending_result["steps"]}
-            has_pending_import_choice = isinstance(state.pending_mutation, dict) and state.pending_mutation.get("kind") == "import_choice"
-            preflight = None if has_pending_import_choice or self._has_explicit_date_instruction(message) else self._preflight_import_dates(import_summary, skills)
-            if preflight:
-                content = str(preflight.get("message", "请先确认导入文件中的日期解释。"))
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "task": state.active_task, "expectedArtifactRevision": pending_result["expectedArtifactRevision"], "operationId": pending_result["operationId"], "ui": {"kind": "choice_applied", "content": content, "optionId": pending_result["optionId"]}, "importPlan": pending_result["steps"]}
+            focused = focused_work_item(state.active_task)
+            if focused and not self._has_explicit_date_instruction(message):
+                content = f"{focused['subjectName']}的原始生日“{focused['rawValue']}”存在多种可能解释，请选择正确日期。"
                 state.append("assistant_message", content=content)
-                state.pending_mutation = {"kind": "import_choice", "title": preflight["title"], "options": preflight["options"]}
+                state.pending_mutation = {"kind": "import_choice", "workItemId": focused["id"], "options": focused["options"]}
                 state.status = "waiting_for_user"
                 store.save(state, expected)
-                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "choice_required", "content": content, "title": preflight["title"], "options": preflight["options"]}, "importPlan": []}
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "task": state.active_task, "expectedArtifactRevision": state.active_task["artifact"]["revision"], "ui": {"kind": "choice_required", "content": content, "title": f"确认{focused['subjectName']}的生日", "options": focused["options"]}, "importPlan": []}
             if import_preflight:
                 content = "日期格式已检查，没有需要确认的日期。"
                 state.append("assistant_message", content=content)
                 state.status = "completed"
                 store.save(state, expected)
-                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "import_plan", "content": content}, "importPlan": []}
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "task": state.active_task, "expectedArtifactRevision": state.active_task["artifact"]["revision"], "ui": {"kind": "import_plan", "content": content}, "importPlan": []}
         messages = [{"role": "system", "content": system_content}]
         messages += [{"role": "user", "content": message}]
         # Import drafts may require inspection, several row edits, and one final reply.

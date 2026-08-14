@@ -75,6 +75,25 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["ui"]["kind"], "reply")
         self.assertEqual(body["ui"]["subjectContact"]["id"], "zhu-1")
 
+    def test_chat_forwards_import_artifact_to_the_runtime(self):
+        received = {}
+
+        class Agent:
+            def run(self, *_args, **kwargs):
+                received.update(kwargs)
+                return {"status": "completed", "content": "已检查", "importPlan": [], "revision": 1}
+
+        secret = "test-secret"
+        token = actor_token({"openid": "trusted-user", "scope": "all", "exp": 9999999999999}, secret)
+        body, status = create_server(Agent(), secret).handle_json({
+            "sessionId": "s1", "message": "检查日期", "actorToken": token,
+            "importSummary": {"rows": []}, "importArtifact": {"id": "draft-1", "revision": 4},
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(received["import_artifact"], {"id": "draft-1", "revision": 4})
+
     def test_same_session_requests_are_serialized_before_the_agent_runs(self):
         started = threading.Event()
         release = threading.Event()
