@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -30,6 +31,13 @@ class AgentHttpApplication:
     def __init__(self, agent: Any, token_secret: str) -> None:
         self.agent = agent
         self.token_secret = token_secret
+        self._session_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._session_locks_guard = threading.Lock()
+
+    def _session_lock(self, actor: dict[str, Any], session_id: str) -> threading.Lock:
+        key = (str(actor.get("openid", "")), str(actor.get("scope", "")), session_id)
+        with self._session_locks_guard:
+            return self._session_locks.setdefault(key, threading.Lock())
 
     def handle_json(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
@@ -47,20 +55,23 @@ class AgentHttpApplication:
             if not session_id or not message:
                 return {"code": "REQUEST_INVALID"}, 400
             import_summary = payload.get("importSummary") if isinstance(payload.get("importSummary"), dict) else None
+            import_preflight = payload.get("importPreflight") is True
             subject_contact = payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None
             require_observation = payload.get("requireObservation") is True
             def run_agent(*args: Any, **kwargs: Any) -> dict[str, Any]:
                 if subject_contact is not None:
                     kwargs["subject_contact"] = subject_contact
                 kwargs["authorized_scope"] = str(actor.get("scope", ""))
+                kwargs["import_preflight"] = import_preflight
                 return self.agent.run(*args, **kwargs)
-            if import_summary is None:
+            with self._session_lock(actor, session_id):
+                if import_summary is None:
+                    if not require_observation:
+                        return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id)), 200
+                    return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, require_observation=True)), 200
                 if not require_observation:
-                    return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id)), 200
-                return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, require_observation=True)), 200
-            if not require_observation:
-                return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, import_summary)), 200
-            return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, import_summary, True)), 200
+                    return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, import_summary)), 200
+                return self._response(run_agent(session_id, actor["openid"], message, actor_token, request_id, import_summary, True)), 200
         except ValueError as error:
             return {"code": str(error)}, 401
         except Exception as error:
@@ -87,7 +98,8 @@ class AgentHttpApplication:
             request_id = str(payload.get("requestId", "")).strip()[:100]
             if not session_id or not message:
                 emit({"type": "error", "code": "REQUEST_INVALID"}); return 400
-            result = self.agent.run(session_id, actor["openid"], message, actor_token, request_id, require_observation=payload.get("requireObservation") is True, subject_contact=payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None, progress=lambda content: emit({"type": "progress", "content": content}), authorized_scope=str(actor.get("scope", "")))
+            with self._session_lock(actor, session_id):
+                result = self.agent.run(session_id, actor["openid"], message, actor_token, request_id, require_observation=payload.get("requireObservation") is True, subject_contact=payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None, progress=lambda content: emit({"type": "progress", "content": content}), authorized_scope=str(actor.get("scope", "")))
             emit({"type": "final", "data": self._response(result)})
             return 200
         except ValueError as error:

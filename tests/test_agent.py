@@ -84,6 +84,40 @@ def test_agent_returns_a_frontend_only_import_plan_without_writing_contacts():
     assert result["content"] == "已删除第 3 行，请核对最新预览。"
     assert result["importPlan"] == [{"tool": "mutate_import", "action": "delete", "filter": {"sourceRow": 3}}]
 
+
+def test_import_date_preflight_completes_without_calling_the_model_when_no_date_needs_attention():
+    class UnexpectedLLM:
+        def chat(self, *_args, **_kwargs):
+            raise AssertionError("date preflight must not ask the model to re-parse valid rows")
+
+    result = Agent(UnexpectedLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=3)).run(
+        "import-preflight-clear", "u1", "检查日期", import_summary={"rows": [{
+            "sourceRow": 3, "name": "王芳", "birthdayKnownYear": True,
+            "birthdayYear": 1990, "birthdayMonth": 10, "birthdayDay": 24,
+            "rawValues": {"生日": "1990年10月24日"},
+        }]}, import_preflight=True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["importPlan"] == []
+    assert "没有需要确认" in result["content"]
+
+def test_import_agent_can_prepare_a_text_directed_duplicate_decision_without_a_ui_card():
+    class ImportLLM:
+        def __init__(self): self.calls = 0
+        def chat(self, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return {"tool_call": {"name": "import.mutate", "arguments": {"action": "resolve_duplicate", "target": {"sourceRow": 3}, "decision": "skip"}}}
+            return {"content": "第3行将保留已有联系人，不会重复导入。"}
+
+    result = Agent(ImportLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=3)).run(
+        "import-duplicate-text", "u1", "第3行保留已有", import_summary={"rows": [{"sourceRow": 3, "name": "王芳", "duplicateCandidates": [{"id": "contact-1", "name": "王芳"}]}]}
+    )
+
+    assert result["status"] == "completed"
+    assert result["importPlan"] == [{"tool": "mutate_import", "action": "resolve_duplicate", "target": {"sourceRow": 3}, "decision": "skip"}]
+
 def test_import_agent_returns_final_plan_after_multiple_draft_operations():
     class ImportLLM:
         def __init__(self): self.calls = 0
@@ -285,6 +319,44 @@ def test_import_agent_proactively_returns_date_choices_for_uploaded_ambiguous_ro
     assert result["ui"]["title"] == "确认许嘉言的生日"
     assert {option["id"] for option in result["ui"]["options"]} == {"date-9-1989-11-22", "date-9-2089-11-22"}
     assert result["importPlan"] == []
+
+def test_import_agent_resolves_a_pending_choice_without_asking_the_model_to_guess():
+    class NeverCalledLLM:
+        def chat(self, *_):
+            raise AssertionError("a saved structured choice must be resolved before invoking the model")
+
+    agent = Agent(NeverCalledLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=4))
+    summary = {"rows": [{"sourceRow": 9, "name": "许嘉言", "rawValues": {"生日": "11/22/89"}}]}
+
+    first = agent.run("import-choice-resolver", "u1", "导入联系人", import_summary=summary)
+    second = agent.run("import-choice-resolver", "u1", "第9行选A", import_summary=summary)
+
+    assert first["ui"]["kind"] == "choice_required"
+    assert second["status"] == "completed"
+    assert second["importPlan"] == [{"tool": "mutate_import", "action": "update", "target": {"sourceRow": 9}, "changes": {"field": "birthday", "value": "1989-11-22"}}]
+    assert second["ui"]["kind"] == "choice_applied"
+
+def test_import_agent_preflights_the_next_ambiguous_date_after_a_choice_was_applied():
+    class NeverCalledLLM:
+        def chat(self, *_):
+            raise AssertionError("the next ambiguous date should be found deterministically")
+
+    agent = Agent(NeverCalledLLM(), import_draft_skill(), InMemoryStateStore(), Settings(max_steps=4))
+    original = {"rows": [
+        {"sourceRow": 9, "name": "许嘉言", "rawValues": {"生日": "11/22/89"}},
+        {"sourceRow": 30, "name": "孙文博", "rawValues": {"生日": "4/11/93"}},
+    ]}
+    agent.run("import-next-choice", "u1", "导入联系人", import_summary=original)
+    agent.run("import-next-choice", "u1", "第9行选A", import_summary=original)
+    refreshed = {"rows": [
+        {"sourceRow": 9, "name": "许嘉言", "birthdayKnownYear": True, "birthdayYear": 1989, "birthdayMonth": 11, "birthdayDay": 22, "rawValues": {"生日": "11/22/89"}},
+        {"sourceRow": 30, "name": "孙文博", "rawValues": {"生日": "4/11/93"}},
+    ]}
+
+    result = agent.run("import-next-choice", "u1", "继续检查剩余日期", import_summary=refreshed)
+
+    assert result["ui"]["kind"] == "choice_required"
+    assert result["ui"]["title"] == "确认孙文博的生日"
 
 def test_grounded_agent_retries_when_the_model_answers_before_using_a_tool():
     class PrematureAnswerLLM:

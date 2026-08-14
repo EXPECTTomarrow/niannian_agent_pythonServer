@@ -3,6 +3,7 @@ import hashlib
 import io
 import hmac
 import json
+import threading
 import unittest
 from contextlib import redirect_stdout
 
@@ -73,6 +74,33 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["ui"]["kind"], "reply")
         self.assertEqual(body["ui"]["subjectContact"]["id"], "zhu-1")
+
+    def test_same_session_requests_are_serialized_before_the_agent_runs(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class Agent:
+            def run(self, session_id, *_args, **_kwargs):
+                calls.append(session_id)
+                if len(calls) == 1:
+                    started.set()
+                    release.wait(timeout=2)
+                return {"status": "completed", "content": "已完成", "revision": len(calls)}
+
+        secret = "test-secret"
+        token = actor_token({"openid": "trusted-user", "scope": "all", "exp": 9999999999999}, secret)
+        server = create_server(Agent(), secret)
+        first = threading.Thread(target=lambda: server.handle_json({"sessionId": "s1", "message": "第一条", "actorToken": token}))
+        first.start()
+        started.wait(timeout=1)
+        second = threading.Thread(target=lambda: server.handle_json({"sessionId": "s1", "message": "第二条", "actorToken": token}))
+        second.start()
+        self.assertEqual(len(calls), 1)
+        release.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertEqual(calls, ["s1", "s1"])
 
     def test_progress_events_are_ndjson_and_end_with_the_final_response(self):
         class Agent:

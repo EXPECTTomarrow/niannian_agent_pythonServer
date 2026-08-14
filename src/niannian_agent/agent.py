@@ -9,7 +9,7 @@ class Agent:
     def __init__(self, llm: Any, skills: SkillRegistry, store: Optional[InMemoryStateStore] = None, settings: Optional[Settings] = None, skill_factory: Optional[Callable[[str], SkillRegistry]] = None, state_store_factory: Optional[Callable[[str], Any]] = None) -> None:
         self.llm, self.skills, self.store, self.settings, self.skill_factory, self.state_store_factory = llm, skills, store or InMemoryStateStore(), settings or Settings(), skill_factory, state_store_factory
 
-    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "") -> dict[str, Any]:
+    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "", import_preflight: bool = False) -> dict[str, Any]:
         store = self.state_store_factory(actor_token) if self.state_store_factory and actor_token else self.store
         state = store.load(session_id, user_id)
         if isinstance(subject_contact, dict) and subject_contact.get("id") and subject_contact.get("name"):
@@ -27,8 +27,18 @@ class Agent:
         if state.subject_contact:
             system_content += " Current conversation subject: " + json.dumps(state.subject_contact, ensure_ascii=False) + ". Resolve pronouns such as 他、她、这位联系人 to this subject unless the user explicitly names another contact."
         if is_import_draft:
-            system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, and editable fields; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. Before every birthday mutation, call date.parse with the original or proposed date. Only a resolved ISO value may be passed to import.mutate. For ambiguous regional date formats or two-digit years, ask the user to confirm by using import.propose_choice with the date.parse candidates; do not guess a locale or century. For an invalid date, explain the correction needed naturally. Return a concise answer in Chinese. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
-            preflight = None if self._has_explicit_date_instruction(message) else self._preflight_import_dates(import_summary, skills)
+            system_content = "You manage only the current uploaded contact import draft. The draft summary below is authoritative and already contains the rows, their original values, validation errors, editable fields, and duplicate candidates; do not request an inspection. Use import tools only to create a safe client-side plan. Never create, update, delete, or import saved contacts. The user must confirm separately. Before every birthday mutation, call date.parse with the original or proposed date. Only a resolved ISO value may be passed to import.mutate. For ambiguous regional date formats or two-digit years, ask the user to confirm by using import.propose_choice with the date.parse candidates; do not guess a locale or century. For an invalid date, explain the correction needed naturally. When the user decides a duplicate row, use import.mutate with resolve_duplicate and the explicit decision. Return concise plain Chinese text: state the outcome first, list only necessary rows, and end with one clear next action. Do not use Markdown, tables, card language, internal operation names, JSON, or detailed execution logs. Draft summary: " + json.dumps(import_summary, ensure_ascii=False) + self._conversation_context(state)
+            pending_result = self._resolve_pending_import_choice(state, message)
+            if pending_result:
+                content = f"已按“{pending_result['label']}”更新导入预览，请继续核对剩余日期和联系人信息。"
+                state.append("assistant_message", content=content)
+                state.last_execution = {"tool": "import.choice", "result": pending_result}
+                state.pending_mutation = None
+                state.status = "completed"
+                store.save(state, expected)
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "choice_applied", "content": content, "optionId": pending_result["id"]}, "importPlan": pending_result["steps"]}
+            has_pending_import_choice = isinstance(state.pending_mutation, dict) and state.pending_mutation.get("kind") == "import_choice"
+            preflight = None if has_pending_import_choice or self._has_explicit_date_instruction(message) else self._preflight_import_dates(import_summary, skills)
             if preflight:
                 content = str(preflight.get("message", "请先确认导入文件中的日期解释。"))
                 state.append("assistant_message", content=content)
@@ -36,6 +46,12 @@ class Agent:
                 state.status = "waiting_for_user"
                 store.save(state, expected)
                 return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "choice_required", "content": content, "title": preflight["title"], "options": preflight["options"]}, "importPlan": []}
+            if import_preflight:
+                content = "日期格式已检查，没有需要确认的日期。"
+                state.append("assistant_message", content=content)
+                state.status = "completed"
+                store.save(state, expected)
+                return {"status": "completed", "content": content, "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "import_plan", "content": content}, "importPlan": []}
         messages = [{"role": "system", "content": system_content}]
         messages += [{"role": "user", "content": message}]
         # Import drafts may require inspection, several row edits, and one final reply.
@@ -165,6 +181,42 @@ class Agent:
         return {"status": "budget_exhausted", "content": "我暂时无法完成这个任务，请换一种说法。", "revision": state.revision, "subjectContact": state.subject_contact}
 
     @staticmethod
+    def _resolve_pending_import_choice(state: Any, message: str) -> Optional[dict[str, Any]]:
+        """Resolve a persisted choice deterministically before invoking the model."""
+        pending = state.pending_mutation if isinstance(state.pending_mutation, dict) else {}
+        if pending.get("kind") != "import_choice":
+            return None
+        options = [item for item in pending.get("options", []) if isinstance(item, dict) and item.get("id") and item.get("steps")]
+        source = str(message or "").strip()
+        normalized = source.casefold()
+        if not options or not source:
+            return None
+        row_match = re.search(r"第\s*(\d+)\s*(?:行|条|个)", source)
+        requested_row = int(row_match.group(1)) if row_match else None
+        selected = None
+        letter = re.search(r"(?:选择|选|用|采用)\s*([A-Ea-e])(?:\b|$)", source)
+        if not letter:
+            letter = re.search(r"\b([A-Ea-e])\b", source)
+        if letter:
+            index = ord(letter.group(1).upper()) - ord("A")
+            if 0 <= index < len(options):
+                selected = options[index]
+        if selected is None:
+            for option in options:
+                option_id = str(option.get("id", "")).casefold()
+                label = str(option.get("label", "")).casefold()
+                if option_id and option_id in normalized or label and label in normalized:
+                    selected = option
+                    break
+        if selected is None:
+            return None
+        if requested_row is not None:
+            target_rows = {int(step.get("target", {}).get("sourceRow")) for step in selected.get("steps", []) if isinstance(step, dict) and isinstance(step.get("target"), dict) and step.get("target", {}).get("sourceRow") is not None}
+            if target_rows and requested_row not in target_rows:
+                return None
+        return {"id": str(selected["id"]), "label": str(selected["label"]), "steps": selected["steps"]}
+
+    @staticmethod
     def _validate_import_birthday(skills: SkillRegistry, call: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Require deterministic date interpretation before a draft birthday mutation."""
         arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
@@ -194,6 +246,10 @@ class Agent:
         parser = skills.get("date.parse")
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
+                continue
+            # The client sends the latest draft on every turn. A resolved birthday
+            # in that draft takes precedence over the immutable source cell.
+            if row.get("birthdayKnownYear") is True and row.get("birthdayYear") and row.get("birthdayMonth") and row.get("birthdayDay"):
                 continue
             raw_values = row.get("rawValues") if isinstance(row.get("rawValues"), dict) else {}
             raw = next((raw_values.get(key) for key in ("生日", "出生日期", "出生年月", "公历生日", "农历生日") if raw_values.get(key) not in (None, "")), None)
