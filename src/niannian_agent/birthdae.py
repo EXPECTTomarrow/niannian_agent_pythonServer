@@ -13,7 +13,7 @@ class BirthdaeToolGatewayClient:
         if not base_url:
             raise ValueError("BIRTHDAE_AGENT_TOOL_URL is required")
         self.base_url = base_url
-        self.http = http_client or httpx.Client(timeout=15)
+        self.http = http_client or httpx.Client(timeout=15, transport=httpx.HTTPTransport(retries=2))
 
     def execute(self, tool: str, arguments: dict[str, Any], actor_token: str, request_id: str = "") -> dict[str, Any]:
         if not actor_token:
