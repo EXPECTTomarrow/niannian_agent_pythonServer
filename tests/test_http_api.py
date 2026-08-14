@@ -20,8 +20,8 @@ class HttpApiTests(unittest.TestCase):
         calls = []
 
         class Agent:
-            def run(self, session_id, user_id, message, actor_token, request_id):
-                calls.append((session_id, user_id, message, actor_token, request_id))
+            def run(self, session_id, user_id, message, actor_token, request_id, **kwargs):
+                calls.append((session_id, user_id, message, actor_token, request_id, kwargs.get("authorized_scope")))
                 return {"status": "completed", "content": "已找到小王", "revision": 2}
 
         secret = "test-secret"
@@ -33,6 +33,7 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["content"], "已找到小王")
         self.assertEqual(calls[0][1], "trusted-user")
         self.assertEqual(calls[0][4], "request-1")
+        self.assertEqual(calls[0][5], "personal")
 
     def test_chat_rejects_invalid_actor_token(self):
         server = create_server(object(), "test-secret")
@@ -42,7 +43,7 @@ class HttpApiTests(unittest.TestCase):
 
     def test_chat_logs_request_id_and_failure_summary_when_agent_fails(self):
         class Agent:
-            def run(self, *_):
+            def run(self, *_, **__):
                 raise RuntimeError("model request failed")
 
         secret = "test-secret"

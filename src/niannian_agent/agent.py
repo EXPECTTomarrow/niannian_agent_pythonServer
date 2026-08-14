@@ -9,7 +9,7 @@ class Agent:
     def __init__(self, llm: Any, skills: SkillRegistry, store: Optional[InMemoryStateStore] = None, settings: Optional[Settings] = None, skill_factory: Optional[Callable[[str], SkillRegistry]] = None, state_store_factory: Optional[Callable[[str], Any]] = None) -> None:
         self.llm, self.skills, self.store, self.settings, self.skill_factory, self.state_store_factory = llm, skills, store or InMemoryStateStore(), settings or Settings(), skill_factory, state_store_factory
 
-    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None) -> dict[str, Any]:
+    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "") -> dict[str, Any]:
         store = self.state_store_factory(actor_token) if self.state_store_factory and actor_token else self.store
         state = store.load(session_id, user_id)
         if isinstance(subject_contact, dict) and subject_contact.get("id") and subject_contact.get("name"):
@@ -22,6 +22,8 @@ class Agent:
         system_content = "You are a careful private assistant. Be attentive to the user's long-running context, verify external facts with available tools, and answer naturally in Chinese. Never mention tools, skills, APIs, internal identifiers, or implementation details. For questions about today, now, relative dates, or date ranges such as future three months, obtain the current time through the available time capability before answering. When a search or organization resolution returns multiple candidates, ask the user to choose and do not guess from stale history. A newly named entity must be resolved again; pronouns and a relationship reference such as 妈妈 refer only to the current confirmed subject. Do not re-search a confirmed subject for a follow-up gift or advice request. Use total fields for counts, never infer a total from a visible page. For a new contact, use contact.propose_create to prepare the existing editable contact form. For any update, use contact.propose_update; for deletion use contact.propose_delete immediately after a unique target is confirmed. These only prepare confirmation or form instructions and never write data. Never claim a contact was created, updated, or deleted unless an execution observation confirms it. For multiple full profiles, use contact.batch_details."
         system_content += "\n" + skills.capability_statement() + " When the user asks what can be done or asks for guidance, give suggestions from this capability statement that fit the user's current context and authorization. Do not use fixed canned prompts."
         system_content += self._conversation_context(state)
+        if authorized_scope:
+            system_content += f" Current authorized contact scope: {authorized_scope}. Do not request a broader or different scope."
         if state.subject_contact:
             system_content += " Current conversation subject: " + json.dumps(state.subject_contact, ensure_ascii=False) + ". Resolve pronouns such as 他、她、这位联系人 to this subject unless the user explicitly names another contact."
         if is_import_draft:
@@ -82,6 +84,7 @@ class Agent:
             attempted_calls.add(call_signature)
             print(json.dumps({"event": "agent.tool_call", "requestId": request_id, "tool": call.get("name"), "arguments": call.get("arguments", {})}, ensure_ascii=False), flush=True)
             tool = skills.get(call["name"])
+            self._constrain_tool_scope(call, tool.name, authorized_scope)
             if is_import_draft and tool.name == "import.mutate":
                 arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
                 target = arguments.get("target") if isinstance(arguments.get("target"), dict) else {}
@@ -170,6 +173,20 @@ class Agent:
             return None
         parser = skills.get("date.parse")
         return parser.handler({"value": changes.get("value", "")}, None)
+
+    @staticmethod
+    def _constrain_tool_scope(call: dict[str, Any], tool_name: str, authorized_scope: str) -> None:
+        """Keep contact reads within the scope embedded in the verified actor token."""
+        if tool_name not in {"contact.list", "contact.query"} or not authorized_scope or authorized_scope == "all":
+            return
+        arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        requested_scope = str(arguments.get("scope", "")).strip()
+        if requested_scope in {"", "all"}:
+            arguments["scope"] = authorized_scope
+            call["arguments"] = arguments
+            return
+        if requested_scope != authorized_scope:
+            raise ValueError("AGENT_SCOPE_FORBIDDEN")
 
     @staticmethod
     def _preflight_import_dates(import_summary: dict[str, Any], skills: SkillRegistry) -> Optional[dict[str, Any]]:

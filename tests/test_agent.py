@@ -3,6 +3,7 @@ from niannian_agent.skills import contact_skill
 from niannian_agent.state import InMemoryStateStore
 from niannian_agent.config import Settings
 from niannian_agent.import_draft import import_draft_skill
+from niannian_agent.skills import SkillRegistry, Tool
 
 def test_skill_capability_declarations_are_available_to_the_agent_without_exposing_internal_tool_names():
     class CapabilityLLM:
@@ -31,6 +32,32 @@ def test_agent_replans_after_observation_and_keeps_subject():
     assert result["status"] == "completed"
     assert state.subject_contact == {"id": "c1", "name": "小王"}
     assert len(state.timeline) == 3
+
+
+def test_agent_constrains_implicit_all_scope_to_the_verified_authorized_scope():
+    received = []
+
+    def list_contacts(arguments, _state):
+        received.append(arguments)
+        return {"status": "ok", "total": 3, "contacts": []}
+
+    registry = SkillRegistry()
+    registry.register(Tool("contact.list", "list contacts", list_contacts, parameters={"type": "object"}))
+
+    class ScopeLLM:
+        def __init__(self): self.calls = 0
+        def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                return {"tool_call": {"name": "contact.list", "arguments": {"scope": "all"}}}
+            return {"content": "当前组织共有 3 位联系人。"}
+
+    result = Agent(ScopeLLM(), registry, InMemoryStateStore(), Settings(max_steps=2)).run(
+        "scope-guard", "u1", "我有多少个联系人", authorized_scope="org-1"
+    )
+
+    assert result["status"] == "completed"
+    assert received == [{"scope": "org-1"}]
 
 def test_session_cannot_be_crossed_between_users():
     store = InMemoryStateStore()

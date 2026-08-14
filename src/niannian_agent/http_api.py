@@ -52,6 +52,7 @@ class AgentHttpApplication:
             def run_agent(*args: Any, **kwargs: Any) -> dict[str, Any]:
                 if subject_contact is not None:
                     kwargs["subject_contact"] = subject_contact
+                kwargs["authorized_scope"] = str(actor.get("scope", ""))
                 return self.agent.run(*args, **kwargs)
             if import_summary is None:
                 if not require_observation:
@@ -86,7 +87,7 @@ class AgentHttpApplication:
             request_id = str(payload.get("requestId", "")).strip()[:100]
             if not session_id or not message:
                 emit({"type": "error", "code": "REQUEST_INVALID"}); return 400
-            result = self.agent.run(session_id, actor["openid"], message, actor_token, request_id, require_observation=payload.get("requireObservation") is True, subject_contact=payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None, progress=lambda content: emit({"type": "progress", "content": content}))
+            result = self.agent.run(session_id, actor["openid"], message, actor_token, request_id, require_observation=payload.get("requireObservation") is True, subject_contact=payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None, progress=lambda content: emit({"type": "progress", "content": content}), authorized_scope=str(actor.get("scope", "")))
             emit({"type": "final", "data": self._response(result)})
             return 200
         except ValueError as error:
