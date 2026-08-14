@@ -59,6 +59,54 @@ def test_agent_constrains_implicit_all_scope_to_the_verified_authorized_scope():
     assert result["status"] == "completed"
     assert received == [{"scope": "org-1"}]
 
+def test_agent_replans_after_a_tool_contract_error_instead_of_failing_the_request():
+    registry = SkillRegistry()
+    registry.register(Tool("organization.resolve", "resolve", lambda args, _state: {"status": "ok", "organization": {"id": "org-1", "name": args["name"]}}))
+    def guarded_list(args, _state):
+        if args.get("scope") != "org-1":
+            raise ValueError("AGENT_SCOPE_FORBIDDEN")
+        return {"status": "ok", "total": 3, "contacts": []}
+    registry.register(Tool("contact.list", "list", guarded_list))
+
+    class ReplanningLLM:
+        def __init__(self): self.calls = 0
+        def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1: return {"tool_call": {"name": "contact.list", "arguments": {"scope": "蒙太奇"}}}
+            if self.calls == 2: return {"tool_call": {"name": "organization.resolve", "arguments": {"name": "蒙太奇"}}}
+            if self.calls == 3: return {"tool_call": {"name": "contact.list", "arguments": {"scope": "org-1"}}}
+            return {"content": "蒙太奇共有 3 位联系人。"}
+
+    result = Agent(ReplanningLLM(), registry, InMemoryStateStore(), Settings(max_steps=4)).run("replan", "u1", "蒙太奇有多少联系人", require_observation=True, authorized_scope="all")
+
+    assert result["status"] == "completed"
+    assert result["content"] == "蒙太奇共有 3 位联系人。"
+
+def test_pending_confirmation_can_be_reopened_without_calling_the_model_again():
+    registry = SkillRegistry()
+    def proposal(_args, state):
+        step = {"action": "update", "requiresConfirmation": True, "target": {"id": "c-1", "name": "朱思远", "scope": "personal"}, "changeSet": {"dislikes": "香菜"}}
+        state.pending_mutation = step
+        return {"plan": {"reply": "请确认修改。", "steps": [step]}}
+    registry.register(Tool("contact.propose_update", "proposal", proposal, requires_confirmation=True))
+
+    class OneCallLLM:
+        def __init__(self): self.calls = 0
+        def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls > 1: raise AssertionError("pending approval should be resumed deterministically")
+            return {"tool_call": {"name": "contact.propose_update", "arguments": {}}}
+
+    llm = OneCallLLM()
+    agent = Agent(llm, registry, InMemoryStateStore(), Settings(max_steps=2))
+    first = agent.run("approval", "u1", "备注他不喜欢香菜")
+    second = agent.run("approval", "u1", "把更新后的信息再给我确认一下")
+
+    assert first["ui"]["kind"] == "confirmation"
+    assert second["ui"]["kind"] == "confirmation"
+    assert second["ui"]["plan"] == first["ui"]["plan"]
+    assert llm.calls == 1
+
 def test_session_cannot_be_crossed_between_users():
     store = InMemoryStateStore()
     store.load("s1", "u1")

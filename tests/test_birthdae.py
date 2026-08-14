@@ -49,6 +49,19 @@ class BirthdaeToolGatewayClientTests(unittest.TestCase):
 
         self.assertEqual(received["arguments"], {"scope": "all", "filter": {"missing": ["address"]}, "page": {"limit": 10}})
 
+    def test_upcoming_birthdays_use_the_dedicated_bounded_gateway_operation(self):
+        received = {}
+        def handler(request):
+            received.update(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True, "data": {"status": "ok", "total": 2, "contacts": [{"name": "甲", "days": 3}]}})
+
+        skill = birthdae_contact_skill(BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler))), "token")
+        result = skill.get("contact.birthdays").handler({"scope": "all", "days": 30}, ConversationState(session_id="s1", user_id="u1"))
+
+        self.assertEqual(received["tool"], "contact.birthdays")
+        self.assertEqual(received["arguments"], {"scope": "all", "days": 30})
+        self.assertEqual(result["total"], 2)
+
     def test_addressbook_list_includes_personal_and_organization_containers(self):
         def handler(_request):
             return httpx.Response(200, json={"success": True, "data": {"status": "ok", "addressbooks": [{"id": "personal", "name": "个人通讯录"}]}})
@@ -56,6 +69,18 @@ class BirthdaeToolGatewayClientTests(unittest.TestCase):
         skill = birthdae_contact_skill(BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler))), "token")
         result = skill.get("addressbook.list").handler({}, ConversationState(session_id="s1", user_id="u1"))
         self.assertEqual(result["addressbooks"][0]["name"], "个人通讯录")
+
+    def test_addressbook_stats_forwards_one_aggregate_request(self):
+        received = {}
+        def handler(request):
+            received.update(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True, "data": {"status": "ok", "addressbooks": [{"name": "蒙太奇通讯录", "contactCount": 3}]}})
+        skill = birthdae_contact_skill(BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler))), "token")
+
+        result = skill.get("addressbook.stats").handler({}, ConversationState(session_id="s1", user_id="u1"))
+
+        self.assertEqual(received["tool"], "addressbook.stats")
+        self.assertEqual(result["addressbooks"][0]["contactCount"], 3)
 
     def test_organization_resolution_and_scoped_count_use_declared_skill_arguments(self):
         received = []

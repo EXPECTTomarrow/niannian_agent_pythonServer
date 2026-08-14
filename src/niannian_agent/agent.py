@@ -17,6 +17,13 @@ class Agent:
         is_import_draft = isinstance(import_summary, dict)
         skills = __import__("niannian_agent.import_draft", fromlist=["import_draft_skill"]).import_draft_skill() if is_import_draft else (self.skill_factory(actor_token) if self.skill_factory else self.skills)
         expected = state.revision
+        resumed_confirmation = None if is_import_draft else self._resume_pending_confirmation(state, message)
+        if resumed_confirmation:
+            state.append("user_message", content=message, requestId=request_id)
+            state.append("assistant_message", content=resumed_confirmation["content"])
+            state.status = "waiting_for_confirmation"
+            store.save(state, expected)
+            return {"status": "completed", "content": resumed_confirmation["content"], "revision": state.revision, "subjectContact": state.subject_contact, "ui": {"kind": "confirmation", "content": resumed_confirmation["content"], "plan": resumed_confirmation["plan"], "subjectContact": state.subject_contact}}
         if is_import_draft:
             from .date_skill import parse_date
             from .task_runtime import focused_work_item, reconcile_import_task, resolve_task_choice
@@ -128,12 +135,21 @@ class Agent:
                 progress(self._progress_label(tool.name, call.get("arguments", {})))
             try:
                 result = tool.handler(call.get("arguments", {}), state)
-            except ValueError as error:
+            except (ValueError, RuntimeError) as error:
                 if is_import_draft and str(error).startswith("IMPORT_"):
                     correction = "The draft operation was incomplete. Ask the user naturally in Chinese for the missing row, target, or value. Do not emit an empty or invalid operation."
                     if str(error) == "IMPORT_CHOICES_REQUIRED":
                         correction = "Your choice proposal was invalid. Each option must contain at least one structured step object: {tool: 'mutate_import', action: 'update', target: {sourceRow: number}, changes: {field: string, value: string}}. Reissue the complete structured choice proposal; never put natural-language sentences in steps."
                     messages.append({"role": "system", "content": correction})
+                    continue
+                if self._is_recoverable_tool_error(error):
+                    error_result = {"status": "error", "code": str(error)[:120], "recoverable": True}
+                    state.append("tool_observation", tool=tool.name, result=error_result, content=json.dumps(error_result, ensure_ascii=False))
+                    messages.extend([
+                        {"role": "assistant", "content": json.dumps(call, ensure_ascii=False)},
+                        {"role": "tool", "content": json.dumps(error_result, ensure_ascii=False)},
+                        {"role": "system", "content": "The operation arguments did not satisfy the tool contract. Re-plan using available resolver or lookup capabilities. Do not repeat the same failed call and do not expose the internal error code."},
+                    ])
                     continue
                 raise
             state.last_execution = {"tool": tool.name, "result": result}
@@ -144,6 +160,9 @@ class Agent:
                 state.pending_mutation = None
             if tool.requires_confirmation:
                 plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+                steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+                if steps:
+                    state.pending_mutation = {"kind": "approval", "plan": plan}
                 content = str(plan.get("reply", "我已整理好修改内容，请确认后执行。"))
                 state.append("assistant_message", content=content)
                 state.status = "completed"
@@ -187,6 +206,20 @@ class Agent:
         state.status = "budget_exhausted"
         store.save(state, expected)
         return {"status": "budget_exhausted", "content": "我暂时无法完成这个任务，请换一种说法。", "revision": state.revision, "subjectContact": state.subject_contact}
+
+    @staticmethod
+    def _is_recoverable_tool_error(error: Exception) -> bool:
+        code = str(error).strip().upper()
+        return bool(code) and any(marker in code for marker in ("_FORBIDDEN", "_REQUIRED", "_INVALID", "_NOT_FOUND", "_AMBIGUOUS"))
+
+    @staticmethod
+    def _resume_pending_confirmation(state: Any, message: str) -> Optional[dict[str, Any]]:
+        pending = state.pending_mutation if isinstance(state.pending_mutation, dict) else {}
+        plan = pending.get("plan") if pending.get("kind") == "approval" and isinstance(pending.get("plan"), dict) else None
+        source = str(message or "").strip()
+        if not plan or not source or not re.search(r"确认|看看|展示|再给我|更新后|修改后", source):
+            return None
+        return {"content": str(plan.get("reply") or "请确认这次操作。"), "plan": plan}
 
     @staticmethod
     def _resolve_pending_import_choice(state: Any, message: str) -> Optional[dict[str, Any]]:
