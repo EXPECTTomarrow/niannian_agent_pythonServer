@@ -27,3 +27,17 @@ class ImportTaskSkillTests(unittest.TestCase):
         self.assertEqual(received["arguments"]["expectedRevision"], 3)
         self.assertEqual(received["arguments"]["operationId"], "op-1")
         self.assertEqual(result["task"]["revision"], 4)
+
+    def test_import_skill_declares_task_reading(self):
+        received = {}
+
+        def handler(request):
+            received.update(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True, "data": {"task": {"id": "task-1", "revision": 3}}})
+
+        client = BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler)))
+        skill = import_task_skill(client, "actor-token")
+        result = skill.get("import.get_task").handler({"taskId": "task-1"}, ConversationState(session_id="s1", user_id="u1"))
+
+        self.assertEqual(received["tool"], "import.get_task")
+        self.assertEqual(result["task"]["id"], "task-1")

@@ -1,5 +1,6 @@
 from .agent import Agent
 from .birthdae import BirthdaeToolGatewayClient, birthdae_contact_skill
+from .import_task_skill import import_task_skill
 from .config import Settings
 from .http_api import create_server, serve
 from .llm import DashScopeClient
@@ -14,7 +15,7 @@ def main() -> None:
         raise RuntimeError("AGENT_TOKEN_SECRET is required")
     client = BirthdaeToolGatewayClient(settings.birthdae_agent_tool_url)
     def build_skills(token: str):
-        return register_runtime_tools(birthdae_contact_skill(client, token))
+        return register_runtime_tools(birthdae_contact_skill(client, token).extend(import_task_skill(client, token)))
 
     tools = build_skills("")
     agent = Agent(DashScopeClient(settings), tools, settings=settings, skill_factory=build_skills, state_store_factory=lambda token: PersistentStateStore(client, token))

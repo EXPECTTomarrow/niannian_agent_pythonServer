@@ -54,7 +54,8 @@ class AgentHttpApplication:
             request_id = str(payload.get("requestId", "")).strip()[:100]
             if not session_id or not message:
                 return {"code": "REQUEST_INVALID"}, 400
-            import_summary = payload.get("importSummary") if isinstance(payload.get("importSummary"), dict) else None
+            import_task_id = str(payload.get("importTaskId", "")).strip()
+            import_summary = None if import_task_id else (payload.get("importSummary") if isinstance(payload.get("importSummary"), dict) else None)
             import_preflight = payload.get("importPreflight") is True
             import_artifact = payload.get("importArtifact") if isinstance(payload.get("importArtifact"), dict) else None
             subject_contact = payload.get("subjectContact") if isinstance(payload.get("subjectContact"), dict) else None
@@ -65,6 +66,8 @@ class AgentHttpApplication:
                 kwargs["authorized_scope"] = str(actor.get("scope", ""))
                 kwargs["import_preflight"] = import_preflight
                 kwargs["import_artifact"] = import_artifact
+                if import_task_id:
+                    kwargs["import_task_id"] = import_task_id
                 return self.agent.run(*args, **kwargs)
             with self._session_lock(actor, session_id):
                 if import_summary is None:

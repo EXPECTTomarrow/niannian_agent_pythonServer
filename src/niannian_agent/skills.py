@@ -19,6 +19,13 @@ class SkillRegistry:
             raise ValueError(f"duplicate tool: {tool.name}")
         self._tools[tool.name] = tool
 
+    def extend(self, other: "SkillRegistry") -> "SkillRegistry":
+        for capability in other._capabilities:
+            self._capabilities.append(dict(capability))
+        for tool in other._tools.values():
+            self.register(tool)
+        return self
+
     def get(self, name: str) -> Tool:
         try:
             return self._tools[name]

@@ -9,7 +9,7 @@ class Agent:
     def __init__(self, llm: Any, skills: SkillRegistry, store: Optional[InMemoryStateStore] = None, settings: Optional[Settings] = None, skill_factory: Optional[Callable[[str], SkillRegistry]] = None, state_store_factory: Optional[Callable[[str], Any]] = None) -> None:
         self.llm, self.skills, self.store, self.settings, self.skill_factory, self.state_store_factory = llm, skills, store or InMemoryStateStore(), settings or Settings(), skill_factory, state_store_factory
 
-    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "", import_preflight: bool = False, import_artifact: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def run(self, session_id: str, user_id: str, message: str, actor_token: str = "", request_id: str = "", import_summary: Optional[dict[str, Any]] = None, require_observation: bool = False, subject_contact: Optional[dict[str, Any]] = None, progress: Optional[Callable[[str], None]] = None, authorized_scope: str = "", import_preflight: bool = False, import_artifact: Optional[dict[str, Any]] = None, import_task_id: str = "") -> dict[str, Any]:
         store = self.state_store_factory(actor_token) if self.state_store_factory and actor_token else self.store
         state = store.load(session_id, user_id)
         if isinstance(subject_contact, dict) and subject_contact.get("id") and subject_contact.get("name"):
@@ -38,6 +38,13 @@ class Agent:
         system_content = "You are a careful private assistant. Be attentive to the user's long-running context, verify external facts with available tools, and answer naturally in Chinese. Never mention tools, skills, APIs, internal identifiers, or implementation details. For questions about today, now, relative dates, or date ranges such as future three months, obtain the current time through the available time capability before answering. When a search or organization resolution returns multiple candidates, ask the user to choose and do not guess from stale history. A newly named entity must be resolved again; pronouns and a relationship reference such as 妈妈 refer only to the current confirmed subject. Do not re-search a confirmed subject for a follow-up gift or advice request. Use total fields for counts, never infer a total from a visible page. For a new contact, use contact.propose_create to prepare the existing editable contact form. For any update, use contact.propose_update; for deletion use contact.propose_delete immediately after a unique target is confirmed. These only prepare confirmation or form instructions and never write data. Never claim a contact was created, updated, or deleted unless an execution observation confirms it. For multiple full profiles, use contact.batch_details."
         system_content += "\n" + skills.capability_statement() + " When the user asks what can be done or asks for guidance, give suggestions from this capability statement that fit the user's current context and authorization. Do not use fixed canned prompts."
         system_content += self._conversation_context(state)
+        if import_task_id:
+            task_snapshot = skills.get("import.get_task").handler({"taskId": import_task_id}, state)
+            task = task_snapshot.get("task") if isinstance(task_snapshot, dict) else None
+            if not isinstance(task, dict):
+                raise RuntimeError("IMPORT_TASK_NOT_FOUND")
+            state.active_task = task
+            system_content += " You are managing the current server-side contact import task. The server snapshot is authoritative. Use only import task tools with the current revision and a new operation ID. Never create a client-side draft or claim an import is complete until the server task confirms it. Current task: " + json.dumps(task, ensure_ascii=False)
         if authorized_scope:
             system_content += f" Current authorized contact scope: {authorized_scope}. Do not request a broader or different scope."
         if state.subject_contact:
@@ -155,6 +162,13 @@ class Agent:
             state.last_execution = {"tool": tool.name, "result": result}
             state.append("tool_observation", tool=tool.name, result=result, content=json.dumps(result, ensure_ascii=False)[:2000])
             has_observation = True
+            if import_task_id and tool.name != "import.get_task" and isinstance(result, dict) and isinstance(result.get("task"), dict):
+                state.active_task = result["task"]
+                content = str(result.get("message") or "已更新导入预览，请继续核对。")
+                state.append("assistant_message", content=content)
+                state.status = "completed"
+                store.save(state, expected)
+                return {"status": "completed", "content": content, "revision": state.revision, "task": result["task"], "ui": {"kind": "import_task", "content": content, "task": result["task"]}}
             if is_import_draft and isinstance(result, dict) and result.get("tool"):
                 turn_import_plan.append(result)
                 state.pending_mutation = None

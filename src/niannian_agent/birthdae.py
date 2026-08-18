@@ -18,7 +18,7 @@ class BirthdaeToolGatewayClient:
     def execute(self, tool: str, arguments: dict[str, Any], actor_token: str, request_id: str = "") -> dict[str, Any]:
         if not actor_token:
             raise ValueError("actor_token is required")
-        safe_arguments = {key: value for key, value in arguments.items() if key in ("name", "contactId", "city", "missingField", "limit", "scope", "refs", "days")}
+        safe_arguments = {key: value for key, value in arguments.items() if key in ("name", "contactId", "city", "missingField", "limit", "scope", "refs", "days", "taskId", "rowId", "rowIds", "decision", "changes", "expectedRevision", "operationId")}
         print(json.dumps({"event": "tool.request", "requestId": request_id, "tool": tool, "arguments": safe_arguments}, ensure_ascii=False), flush=True)
         response = self.http.post(self.base_url, json={
             "tool": tool,

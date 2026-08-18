@@ -17,6 +17,23 @@ def actor_token(payload, secret):
 
 
 class HttpApiTests(unittest.TestCase):
+
+    def test_chat_forwards_import_task_id_without_client_draft_summary(self):
+        received = {}
+
+        class FakeAgent:
+            def run(self, *_args, **kwargs):
+                received.update(kwargs)
+                return {"status": "completed", "content": "已读取导入任务。"}
+
+        token = actor_token({"openid": "u1", "scope": "all", "exp": 9999999999999}, "secret")
+        server = create_server(FakeAgent(), "secret")
+        result, status = server.handle_json({"sessionId": "s1", "message": "删除第 2 行", "actorToken": token, "importTaskId": "task-1", "importSummary": {"rows": [{"name": "不应传入"}]}})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(result["content"], "已读取导入任务。")
+        self.assertEqual(received["import_task_id"], "task-1")
+        self.assertNotIn("import_summary", received)
     def test_chat_uses_verified_token_owner_not_client_user_id(self):
         calls = []
 
