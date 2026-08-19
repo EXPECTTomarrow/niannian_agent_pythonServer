@@ -402,6 +402,8 @@ class Agent:
             parts.append("长期会话摘要: " + str(state.summary)[:4000])
         if state.subject_contact:
             parts.append("当前会话实体: " + json.dumps(state.subject_contact, ensure_ascii=False))
+        if state.active_addressbook:
+            parts.append("当前通讯录范围: " + json.dumps(state.active_addressbook, ensure_ascii=False) + "。后续按姓名查询联系人时默认只查询此通讯录；只有用户明确要求全部通讯录或指定其他通讯录时才改变范围。")
         if state.pending_candidates:
             parts.append("待用户消歧的候选实体: " + json.dumps(state.pending_candidates, ensure_ascii=False) + "。用户按关系、组织或序号选择后，必须调用 contact.select 传入候选的 ref.id。")
         if state.pending_mutation:

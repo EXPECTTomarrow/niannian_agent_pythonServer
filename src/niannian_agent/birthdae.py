@@ -57,7 +57,13 @@ def birthdae_contact_skill(client: BirthdaeToolGatewayClient, actor_token: str) 
 
     def search(arguments: dict[str, Any], state: Any) -> dict[str, Any]:
         request_id = state.timeline[-1].get("requestId", "") if state.timeline else ""
-        result = client.execute("contact.search", {"name": arguments.get("name", "")}, actor_token, request_id)
+        scope = str(arguments.get("scope", "")).strip()
+        if not scope and isinstance(state.active_addressbook, dict):
+            scope = str(state.active_addressbook.get("id", "")).strip()
+        payload = {"name": arguments.get("name", "")}
+        if scope:
+            payload["scope"] = scope
+        result = client.execute("contact.search", payload, actor_token, request_id)
         contacts = result.get("contacts", [])
         if result.get("status") == "ok" and contacts:
             state.subject_contact = {**contacts[0].get("ref", {}), "name": contacts[0].get("name", "")}
@@ -84,7 +90,13 @@ def birthdae_contact_skill(client: BirthdaeToolGatewayClient, actor_token: str) 
             payload["scope"] = arguments["scope"]
         if arguments.get("missingField"):
             payload["missingField"] = arguments["missingField"]
-        return client.execute("contact.list", payload, actor_token, request_id)
+        result = client.execute("contact.list", payload, actor_token, request_id)
+        scope = str(payload.get("scope", "")).strip()
+        if result.get("status") == "ok" and scope and scope != "all":
+            current = state.active_addressbook if isinstance(state.active_addressbook, dict) else {}
+            default_name = "个人通讯录" if scope == "personal" else "当前群组通讯录"
+            state.active_addressbook = {"id": scope, "name": current.get("name", default_name) if current.get("id") == scope else default_name}
+        return result
 
     def query_contacts(arguments: dict[str, Any], state: Any) -> dict[str, Any]:
         request_id = state.timeline[-1].get("requestId", "") if state.timeline else ""
@@ -112,7 +124,11 @@ def birthdae_contact_skill(client: BirthdaeToolGatewayClient, actor_token: str) 
 
     def resolve_organization(arguments: dict[str, Any], state: Any) -> dict[str, Any]:
         request_id = state.timeline[-1].get("requestId", "") if state.timeline else ""
-        return client.execute("organization.resolve", {"name": arguments.get("name", "")}, actor_token, request_id)
+        result = client.execute("organization.resolve", {"name": arguments.get("name", "")}, actor_token, request_id)
+        organization = result.get("organization")
+        if result.get("status") == "ok" and isinstance(organization, dict) and organization.get("id"):
+            state.active_addressbook = {"id": organization["id"], "name": organization.get("name", "未命名群组")}
+        return result
 
     def verified_subject(state: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         subject = state.subject_contact if isinstance(state.subject_contact, dict) else {}
@@ -183,7 +199,7 @@ def birthdae_contact_skill(client: BirthdaeToolGatewayClient, actor_token: str) 
         }
         return {"status": "confirmation_required", "plan": {"intent": "contact_agent", "reply": "删除后无法恢复，请确认是否删除该联系人。", "steps": [step]}}
 
-    registry.register(Tool("contact.search", "Search authorized contacts by name before selecting one", search))
+    registry.register(Tool("contact.search", "Search contacts by name. When a current address book has been resolved, omit scope to search it by default. Set scope to all only when the user explicitly asks to search every address book.", search, parameters={"type": "object", "properties": {"name": {"type": "string"}, "scope": {"type": "string"}}, "required": ["name"]}))
     registry.register(Tool("contact.details", "Read the authorized details of the selected contact", details))
     registry.register(Tool("contact.select", "Select one contact candidate by its id after an ambiguity clarification, then read its authorized details", select, parameters={"type": "object", "properties": {"contactId": {"type": "string"}}, "required": ["contactId"]}))
     registry.register(Tool("contact.list", "List authorized contacts in personal, all, or one resolved organization scope. Filter by a declared missing field when needed. Use total for counts, never the visible contacts array length.", list_contacts, parameters={"type": "object", "properties": {"scope": {"type": "string"}, "city": {"type": "string"}, "missingField": {"type": "string", "enum": ["address", "phone", "company", "birthday", "relation"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}))

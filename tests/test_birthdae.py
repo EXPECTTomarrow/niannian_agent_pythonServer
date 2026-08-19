@@ -102,6 +102,40 @@ class BirthdaeToolGatewayClientTests(unittest.TestCase):
         self.assertEqual(listed["total"], 38)
         self.assertEqual(received[1]["arguments"], {"scope": "org-1", "city": "", "limit": 1})
 
+    def test_contact_search_defaults_to_the_last_resolved_organization(self):
+        received = []
+
+        def handler(request):
+            body = json.loads(request.content.decode("utf-8"))
+            received.append(body)
+            if body["tool"] == "organization.resolve":
+                return httpx.Response(200, json={"success": True, "data": {"status": "ok", "organization": {"id": "org-1", "name": "智菲公司通讯录"}}})
+            return httpx.Response(200, json={"success": True, "data": {"status": "ok", "contacts": [{"ref": {"id": "c-1", "scope": "org-1"}, "name": "陈雨桐"}]}})
+
+        skill = birthdae_contact_skill(BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler))), "token")
+        state = ConversationState(session_id="s1", user_id="u1")
+        skill.get("organization.resolve").handler({"name": "智菲"}, state)
+        skill.get("contact.search").handler({"name": "陈雨桐"}, state)
+
+        self.assertEqual(state.active_addressbook, {"id": "org-1", "name": "智菲公司通讯录"})
+        self.assertEqual(received[1]["arguments"], {"name": "陈雨桐", "scope": "org-1"})
+
+    def test_contact_search_defaults_to_the_organization_used_for_the_member_list(self):
+        received = []
+
+        def handler(request):
+            body = json.loads(request.content.decode("utf-8"))
+            received.append(body)
+            return httpx.Response(200, json={"success": True, "data": {"status": "ok", "total": 47, "contacts": []}})
+
+        skill = birthdae_contact_skill(BirthdaeToolGatewayClient("https://gateway.example", httpx.Client(transport=httpx.MockTransport(handler))), "token")
+        state = ConversationState(session_id="s1", user_id="u1")
+        skill.get("contact.list").handler({"scope": "org-1", "limit": 100}, state)
+        skill.get("contact.search").handler({"name": "陈雨桐"}, state)
+
+        self.assertEqual(state.active_addressbook, {"id": "org-1", "name": "当前群组通讯录"})
+        self.assertEqual(received[1]["arguments"], {"name": "陈雨桐", "scope": "org-1"})
+
     def test_contact_details_uses_the_current_subject_when_no_id_is_provided(self):
         received = {}
 

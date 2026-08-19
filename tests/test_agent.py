@@ -596,7 +596,7 @@ def test_persistent_state_store_restores_recent_events_and_task_summary():
     saved = {}
     class Client:
         def load_conversation(self, session_id, token):
-            return {"revision": 4, "state": {"subjectContact": {"id": "zhu-1", "name": "朱思远", "scope": "org-1"}, "task": {"goal": "补全朱思远的资料", "status": "active"}, "summary": "已确认朱思远是当前联系人。"}, "events": [{"type": "user_message", "content": "查询朱思远"}, {"type": "assistant_message", "content": "已找到朱思远。"}]}
+            return {"revision": 4, "state": {"subjectContact": {"id": "zhu-1", "name": "朱思远", "scope": "org-1"}, "activeAddressbook": {"id": "org-1", "name": "智菲公司通讯录"}, "task": {"goal": "补全朱思远的资料", "status": "active"}, "summary": "已确认朱思远是当前联系人。"}, "events": [{"type": "user_message", "content": "查询朱思远"}, {"type": "assistant_message", "content": "已找到朱思远。"}]}
         def commit_conversation(self, session_id, revision, state, events, token):
             saved.update({"session_id": session_id, "revision": revision, "state": state, "events": events})
             return {"revision": revision + 1, "state": state}
@@ -608,10 +608,12 @@ def test_persistent_state_store_restores_recent_events_and_task_summary():
     store.save(state, 4)
 
     assert state.subject_contact["id"] == "zhu-1"
+    assert state.active_addressbook == {"id": "org-1", "name": "智菲公司通讯录"}
     assert state.goal == "补全朱思远的资料"
     assert len(state.timeline) == 3
     assert saved["revision"] == 4
     assert saved["state"]["summary"].endswith("完整资料。")
+    assert saved["state"]["activeAddressbook"] == {"id": "org-1", "name": "智菲公司通讯录"}
 
 def test_agent_uses_summary_and_recent_events_as_long_conversation_context():
     class Store:
@@ -628,6 +630,16 @@ def test_agent_uses_summary_and_recent_events_as_long_conversation_context():
 
     result = Agent(LLM(), contact_skill([]), Store(), Settings(max_steps=1)).run("s1", "u1", "继续")
     assert result["status"] == "completed"
+
+def test_agent_labels_ambiguous_contacts_with_addressbook_and_relation():
+    from niannian_agent.agent import Agent
+
+    message = Agent._clarification_message({"contacts": [
+        {"name": "陈雨桐", "source": "智菲公司通讯录", "relation": "同事"},
+        {"name": "陈雨桐", "source": "个人通讯录", "relation": "客户"},
+    ]})
+
+    assert message == "找到多位同名联系人：陈雨桐（同事 / 智菲公司通讯录）、陈雨桐（客户 / 个人通讯录）。请告诉我具体是哪一位。"
 
 def test_persistent_state_store_appends_only_new_events_and_bounds_the_projection():
     from niannian_agent.state import PersistentStateStore

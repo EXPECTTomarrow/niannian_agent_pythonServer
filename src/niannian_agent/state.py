@@ -9,6 +9,7 @@ class ConversationState:
     revision: int = 0
     timeline: list[dict[str, Any]] = field(default_factory=list)
     subject_contact: Optional[dict[str, Any]] = None
+    active_addressbook: Optional[dict[str, Any]] = None
     pending_candidates: list[dict[str, Any]] = field(default_factory=list)
     goal: Optional[str] = None
     last_execution: Optional[dict[str, Any]] = None
@@ -57,6 +58,7 @@ class PersistentStateStore:
         state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
         self._remote_revision[session_id] = int(payload.get("revision", 0) or 0)
         subject = state.get("subjectContact") if isinstance(state.get("subjectContact"), dict) else None
+        active_addressbook = state.get("activeAddressbook") if isinstance(state.get("activeAddressbook"), dict) else None
         candidates = state.get("workItems", {}).get("pendingCandidates", []) if isinstance(state.get("workItems"), dict) else []
         events = payload.get("events") if isinstance(payload.get("events"), list) else []
         self._event_offsets[session_id] = len(events[-20:])
@@ -66,6 +68,7 @@ class PersistentStateStore:
         return ConversationState(
             session_id=session_id, user_id=user_id, revision=self._remote_revision[session_id],
             timeline=[item for item in events[-20:] if isinstance(item, dict)], subject_contact=subject,
+            active_addressbook=active_addressbook,
             pending_candidates=[item for item in candidates if isinstance(item, dict)][:10],
             goal=task.get("goal") if isinstance(task.get("goal"), str) else None,
             status=task.get("status") if isinstance(task.get("status"), str) and task.get("status") else "idle",
@@ -89,6 +92,7 @@ class PersistentStateStore:
                 summary = (summary + "\n历史事件摘要: " + compressed)[-4000:]
         projection = {
             "subjectContact": state.subject_contact,
+            "activeAddressbook": state.active_addressbook,
             "task": {"domain": "", "goal": state.goal or "", "status": state.status},
             "workItems": {"pendingCandidates": state.pending_candidates[:10], "pendingMutation": state.pending_mutation}, "facts": [], "summary": summary,
             "activeTask": state.active_task,
